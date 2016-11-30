@@ -1,4 +1,6 @@
 """Example of pykitti.odometry usage."""
+import pcl
+from pcl.registration import icp, gicp, icp_nl
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
@@ -12,14 +14,14 @@ __email__ = "lee.clement@robotics.utias.utoronto.ca"
 basedir = '/media/stars-jordan/Data/KITTI/odometry/dataset'
 
 # Specify the dataset to load
-sequence = '04'
+sequence = '06'
 
 # Optionally, specify the frame range to load
-frame_range = range(0, 20, 5)
+frame_range = range(0, 20, 1)
 
 # Load the data
-dataset = pykitti.odometry(basedir, sequence)
-# dataset = pykitti.odometry(basedir, sequence, frame_range)
+# dataset = pykitti.odometry(basedir, sequence)
+dataset = pykitti.odometry(basedir, sequence, frame_range)
 
 # Load some data
 dataset.load_calib()        # Calibration data are accessible as named tuples
@@ -34,14 +36,14 @@ basedir_raw = '/media/stars-jordan/Data/KITTI/raw'
 
 # Specify the dataset to load
 date = '2011_09_30'
-drive = '0016'
+drive = '0020'
 
 # Optionally, specify the frame range to load
 frame_range = range(0, 20, 5)
 
 # Load the data
-dataset_raw = pykitti.raw(basedir_raw, date, drive)
-# dataset_raw = pykitti.raw(basedir_raw, date, drive, frame_range)
+# dataset_raw = pykitti.raw(basedir_raw, date, drive)
+dataset_raw = pykitti.raw(basedir_raw, date, drive, frame_range)
 
 # Load some data
 dataset_raw.load_calib()        # Calibration data are accessible as named tuples
@@ -62,22 +64,47 @@ print('\nRGB stereo pair baseline [m]: ' + str(dataset.calib.b_rgb))
 print('\nFirst timestamp: ' + str(dataset.timestamps[0]))
 print('\nSecond ground truth pose:\n' + str(dataset.T_w_cam0[1]))
 
-''''
-f, ax = plt.subplots(2, 2, figsize=(15, 5))
-print(dataset.gray[0])
-ax[0, 0].imshow(dataset.gray[0].left, cmap='gray')
-ax[0, 0].set_title('Left Gray Image (cam0)')
 
-ax[0, 1].imshow(dataset.gray[0].right, cmap='gray')
-ax[0, 1].set_title('Right Gray Image (cam1)')
+traj = np.zeros((3,len(dataset.frame_range)))
+for i in range(len(dataset.frame_range)):
+	velo_range = range(0, dataset.velo[i].shape[0], 100)
+	#print(len(velo_range))
+	velo_points = np.zeros((len(velo_range),4))
+	velo_points[:,0:3] = dataset.velo[i][velo_range, 0:3]
+	velo_points[:,3] = np.ones((len(velo_range)))
+	velo_points_cframe = np.dot(dataset_raw.calib.T_cam0unrect_velo , velo_points.T)
 
-ax[1, 0].imshow(dataset.rgb[0].left)
-ax[1, 0].set_title('Left RGB Image (cam2)')
+	traj[:,i] = -1*dataset.T_w_cam0[i][0:3,3]
 
-ax[1, 1].imshow(dataset.rgb[0].right)
-ax[1, 1].set_title('Right RGB Image (cam3)')
-'''
 
+	if i == 0:
+		velo_points_wframe = np.dot(dataset.T_w_cam0[i] , velo_points_cframe)
+		#velo_points_wframe = velo_points_cframe
+	elif i == 2:
+		second_scan_wframe = np.dot(dataset.T_w_cam0[i] , velo_points_cframe)
+		
+		velo_points_wframe = np.append(velo_points_wframe, second_scan_wframe , axis = 1)
+	else:
+		velo_points_wframe = np.append(velo_points_wframe, np.dot(dataset.T_w_cam0[i] , velo_points_cframe) , axis = 1)
+		#velo_points_wframe = np.append(velo_points_wframe, velo_points_cframe , axis = 1)
+
+print(traj.T)
+f = plt.figure()
+ax = f.add_subplot(111, projection='3d')
+
+
+ax.scatter(velo_points_wframe[0,:],
+            velo_points_wframe[1,:],
+            velo_points_wframe[2,:])
+
+ax.scatter(traj[0,:],
+            traj[1,:],
+            traj[2,:],
+	    color='r')
+ax.set_title('Whole Velodyne cloud (subsampled, world frame)')
+plt.xlabel('x')
+plt.ylabel('y')
+	
 
 # Plot every 100th point so things don't get too bogged down
 velo_range = range(0, dataset.velo[2].shape[0], 100)
@@ -89,7 +116,9 @@ ax2.scatter(dataset.velo[2][velo_range, 0],
             c=dataset.velo[2][velo_range, 3],
             cmap='gray')
 ax2.set_title('Third Velodyne scan (subsampled)')
-
+plt.xlabel('x')
+plt.ylabel('y')
+"""
 f4 = plt.figure()
 ax4 = f4.add_subplot(111, projection='3d')
 ax4.scatter(dataset.velo[100][velo_range, 0],
@@ -101,13 +130,15 @@ ax4.set_title('101st Velodyne scan (subsampled)')
 plt.xlabel('x')
 plt.ylabel('y')
 #plt.zlabel('z')
+"""
 
+velo_range = range(0, dataset_raw.velo[2].shape[0], 100)
 f3 = plt.figure()
 ax3 = f3.add_subplot(111, projection='3d')
 
-velo_points = np.zeros((1239,4))
+velo_points = np.zeros((len(velo_range),4))
 velo_points[:,0:3] = dataset.velo[2][velo_range, 0:3]
-velo_points[:,3] = np.ones((1239))
+velo_points[:,3] = np.ones((len(velo_range)))
 velo_points_cframe = np.dot(dataset_raw.calib.T_cam0unrect_velo , velo_points.T)
 
 ax3.scatter(velo_points_cframe[0,:],
@@ -116,9 +147,47 @@ ax3.scatter(velo_points_cframe[0,:],
             c=dataset.velo[2][velo_range, 3],
             cmap='gray')
 ax3.set_title('Third Velodyne scan (subsampled, cam0 frame)')
-'''
+"""
+ax3.scatter(traj[0,2],
+            traj[1,2],
+            traj[2,2],
+	    color='r')
+"""
+ax3.scatter(-dataset_raw.calib.T_cam0unrect_velo[0,3],
+            -dataset_raw.calib.T_cam0unrect_velo[1,3],
+            -dataset_raw.calib.T_cam0unrect_velo[2,3],
+	    color='r')
 
-'''
+
+plt.show()
+
+source_points = velo_points_cframe[0:3,:].T
+source_points = source_points.astype(np.float32)
+pc_source = pcl.PointCloud()
+pc_source.from_array(source_points)
+
+target_points = velo_points_wframe[0:3,:].T
+target_points = target_points.astype(np.float32)
+pc_target = pcl.PointCloud()
+pc_target.from_array(target_points)
+
+_, alignment, _, _ = icp(pc_source, pc_target)
+
+
+f5 = plt.figure()
+ax5 = f5.add_subplot(111, projection='3d')
+
+aligned_source = np.dot(alignment, velo_points_cframe)
+
+ax5.scatter(aligned_source[0,:],
+            aligned_source[1,:],
+            aligned_source[2,:],
+            color='r')
+#ax3.set_title('Third Velodyne scan (subsampled, cam0 frame)')
+
+ax5.scatter(second_scan_wframe[0,:],
+            second_scan_wframe[1,:],
+            second_scan_wframe[2,:])
 
 
 plt.show()
