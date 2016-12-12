@@ -105,7 +105,7 @@ plt.show()
 """
 
 #Get the measurements y of sensor offset based on point cloud registration
-y = np.zeros(2*len(dataset.frame_range))
+y = np.zeros(6*len(dataset.frame_range))
 for i in range(len(dataset.frame_range)):
 	#Build the world->cam0 transform from the cam0->world transform
 	T_cam0_w = np.zeros((4,4))
@@ -124,15 +124,11 @@ for i in range(len(dataset.frame_range)):
 	velo_points[:,0:3] = dataset.velo[i][velo_range, 0:3]
 	velo_points[:,3] = np.ones((len(velo_range)))
 
-	###########try incorporating the trajectory to give better initial guess for alignment###############
-	#velo_points = np.dot( T_cam0_w , velo_points.T )
+	###########provide a good initial alignment###############
 	#TODO: Move this array creation outside the loop (it's not time dependent)
-	#(p-v frame is the velodyne frame, but rotated to match the cam0 frame, and 
-	# aligned along the normal
-	# to the driving plane. This leaves only a planar transform between the psuedo-velo and
-	# cam0 frames)
+	#(p-v frame is the velodyne frame, but rotated to (nearly) match the cam0 frame
 	T_pv_v = np.zeros((4,4))
-	T_pv_v[0:3,0:3] = np.array([[0,-1,0],[0,0,-1],[1,0,0]])
+	T_pv_v[0:3,0:3] = np.array([[0,-1,0],[0,0,-1],[1,0,0]])#realign the axes to point the right way (ie z is up for velo but forward for cam0/world frames)
 	T_pv_v[3,3] = 1
 
 	velo_points = np.dot(T_pv_v, velo_points.T)
@@ -150,8 +146,14 @@ for i in range(len(dataset.frame_range)):
 
 	_, T_cam0_v, _, fitness = icp(pc_source, pc_target)
 	#TODO: Construct the y values (possibly using Lie algebra)
-	"""y[2*i] = alignment[0,3]
-	y[2*i + 1] = alignment[2,3]"""
+	y[6*i] = T_cam0_v[0,3]
+	y[6*i + 1] = T_cam0_v[1,3]
+	y[6*i + 2] = T_cam0_v[2,3]
+	#next 3 lines only valid for small rotations
+	y[6*i + 3] = T_cam0_v[2,1]
+	y[6*i + 4] = T_cam0_v[0,2]
+	y[6*i + 5] = T_cam0_v[1,0]
+	
 
 	print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
 	print('\tvelo->cam0 translation :\n\n' + str(T_cam0_v))
@@ -179,4 +181,34 @@ for i in range(len(dataset.frame_range)):
 		plt.show()
 	
 	###
+
+K = len(dataset.frame_range) - 1 #number of timesteps (one less than number of indices because we have index for timestep 0)
+x_check_f = np.zeros((6,K+1))
+x_hat_f = np.zeros((6,K+1))
+x_hat = np.zeros((6,K+1))
+P_check_f = np.zeros((6,6,K+1))
+P_hat_f = np.zeros((6,6,K+1))
+P_hat = np.zeros((6,6,K+1))
+
+#x_check_f[:,0] = np.array([[0],[0],[0],[0],[0],[0]]) #implicitly done
+P_check_f[:,:,0] = np.array([[0.816,0,0,0,0,0],[0,0.11,0,0,0,0],[0,0,0.816,0,0,0],[0,0,0,4.39,0,0],[0,0,0,0,4.39,0],[0,0,0,0,0,4.39]]) #3-sigma = either 2.7m, 1m or 2pi rads
+R_k = np.array([[0.096,0,0,0,0,0],[0,0.0003,0,0,0,0],[0,0,0.15,0,0,0],[0,0,0,0.00005,0,0],[0,0,0,0,0.00005,0],[0,0,0,0,0,0.00005]])#from get_R_2.py
+
+for k in range(K+1):
+    if (k>0):
+	P_check_f[:,:,k] = P_hat_f[:,:,(k-1)]
+	x_check_f[:,k] = x_hat_f[:,(k-1)]
+    kalman = np.dot( P_check_f[:,:,k] , np.linalg.inv(P_check_f[:,:,k] + R_k) )
+    P_hat_f[:,:,k] = np.dot( np.identity(6)-kalman , P_check_f[:,:,k] )
+    x_hat_f[:,k] = x_check_f[:,k] + np.dot( kalman , y[(6*k):(6*k+6)]-x_check_f[:,k] )
+
+x_hat[:,K] = x_hat_f[:,K]
+P_hat[:,:,K] = P_hat_f[:,:,K]
+
+for k in range(K,0,-1):
+    cov_factor = np.dot( P_hat_f[:,:,k-1] , np.linalg.inv(P_check_f[:,:,k-1]) )
+    x_hat[:,k-1] = x_hat_f[:,k-1] + np.dot( cov_factor , x_hat[:,k]-x_check_f[:,k] )
+    P_hat[:,:,k-1] = P_hat_f[:,:,k-1] + np.dot( cov_factor , np.dot( P_hat[:,:,k]-P_check_f[:,:,k] , cov_factor.T ) )
+
+print(x_hat)
 
