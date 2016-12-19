@@ -1,5 +1,5 @@
 """Batch Linear Gaussian sensor offset estimation using point cloud registration
-Module 2 - estimating full 6DOF offset (not using the psedo-velo frame)"""
+Module 3 - estimating full 6DOF offset & imu pose"""
 
 import pcl
 from pcl.registration import icp, gicp, icp_nl
@@ -107,11 +107,6 @@ plt.xlabel('x')
 plt.ylabel('y')
 plt.show()
 """
-#invert the transformation
-T_imu_cam0 = np.identity(4)
-T_imu_cam0[0:3,0:3] = dataset_raw.calib.T_cam0_imu[0:3,0:3].T
-T_imu_cam0[0:3,3] = -1 * np.dot( dataset_raw.calib.T_cam0_imu[0:3,0:3].T , dataset_raw.calib.T_cam0_imu[0:3,3] )
-
 
 y = np.zeros(6*len(dataset.frame_range))
 omega = np.zeros(6*len(dataset.frame_range))
@@ -129,8 +124,11 @@ T_v_w_meas = np.zeros((4,4,K+1))
 x_check_f[0:4,0:4,0] = np.identity(4)
 x_check_f[4:8,0:4,0] = np.identity(4)
 x_check_f[4:7,0:3,0] = np.array([[0,0,1],[-1,0,0],[0,-1,0]])#alter the rotational component of the believed first pose to account for different axis definitions between the world and IMU frames (otherwise ICP won't converge) TODO: confirm this is right
-P_check_f[0:6,0:6,0] = np.array([[0.816,0,0,0,0,0],[0,0.11,0,0,0,0],[0,0,0.816,0,0,0],[0,0,0,4.39,0,0],[0,0,0,0,4.39,0],[0,0,0,0,0,4.39]]) #calibration: 3-sigma = either 2.7m, 1m or 2pi rads
+
+P_check_f[0:6,0:6,0] = np.array([[0.816,0,0,0,0,0],[0,0.816,0,0,0,0],[0,0,0.11,0,0,0],[0,0,0,4.39,0,0],[0,0,0,0,4.39,0],[0,0,0,0,0,4.39]]) #calibration: 3-sigma = either 2.7m, 1m or 2pi rads
+
 P_check_f[6:12,6:12,0] = np.array([[0.01,0,0,0,0,0],[0,0.01,0,0,0,0],[0,0,0.01,0,0,0],[0,0,0,0.000034,0,0],[0,0,0,0,0.000034,0],[0,0,0,0,0,0.000034]]) #position: 3-sigma = either 0.3m or pi/180 rads (1 degree)
+
 R_k = np.array([[0.096,0,0,0,0,0],[0,0.0003,0,0,0,0],[0,0,0.15,0,0,0],[0,0,0,0.00005,0,0],[0,0,0,0,0.00005,0],[0,0,0,0,0,0.00005]])#from get_R_2.py
 
 w_sigma = 0.000175 #rad/s (from OXTS user manual angular rate sigma value)
@@ -158,7 +156,7 @@ for i in range(len(dataset.frame_range)):
 		delta_p = delta_t*omega[6*i:(6*i + 6)].T #transpose to make it a column
 
 		Q_k_IMU = np.square(delta_t)*Q_k_rate #convert rate uncertainty to pose change uncertainty
-		
+		Q_k[6:12,6:12] = Q_k_IMU
 		#Pose change forward mapping
 		a = delta_p[3:6]#column of rotational deltas
 		phi = np.linalg.norm(a)
@@ -179,9 +177,9 @@ for i in range(len(dataset.frame_range)):
 		Xi[0:3,0:3] = C
 		Xi[0:3,3] = r
 
-		state_tr_mat = np.identity(8)
-		state_tr_mat[4:8,4:8] = Xi
-		x_check_f[:,:,i] = np.dot(state_tr_mat , x_hat_f[:,:,(i-1)])
+		state_check_tr_mat = np.identity(8)
+		state_check_tr_mat[4:8,4:8] = Xi
+		x_check_f[:,:,i] = np.dot(state_check_tr_mat , x_hat_f[:,:,(i-1)])
 
 		Ad_Xi = np.zeros((6,6))
 		Ad_Xi[0:3,0:3] = Xi[0:3,0:3]
@@ -191,7 +189,6 @@ for i in range(len(dataset.frame_range)):
 		cov_tr_mat = np.identity(12)
 		cov_tr_mat[6:12,6:12] = Ad_Xi
 		
-		Q_k[6:12,6:12] = Q_k_IMU
 		P_check_f[:,:,i] = np.dot(cov_tr_mat , np.dot(P_hat_f[:,:,(i-1)] , cov_tr_mat.T) ) + Q_k
 
 	T_v_w = np.dot( x_check_f[0:4,:], x_check_f[4:8,:])#second term is world->imu, first is imu->velodyne
