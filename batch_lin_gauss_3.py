@@ -6,6 +6,7 @@ from pcl.registration import icp, gicp, icp_nl
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
+from util import pose_inv_map, rot_for_map, pose_for_map
 
 import pykitti
 
@@ -123,8 +124,11 @@ P_check_f = np.zeros((12,12,K+1))
 P_hat_f = np.zeros((12,12,K+1))
 P_hat = np.zeros((12,12,K+1))
 
+T_v_w_meas = np.zeros((4,4,K+1))
+
 x_check_f[0:4,0:4,0] = np.identity(4)
 x_check_f[4:8,0:4,0] = np.identity(4)
+x_check_f[4:7,0:3,0] = np.array([[0,0,1],[-1,0,0],[0,-1,0]])#alter the rotational component of the believed first pose to account for different axis definitions between the world and IMU frames (otherwise ICP won't converge) TODO: confirm this is right
 P_check_f[0:6,0:6,0] = np.array([[0.816,0,0,0,0,0],[0,0.11,0,0,0,0],[0,0,0.816,0,0,0],[0,0,0,4.39,0,0],[0,0,0,0,4.39,0],[0,0,0,0,0,4.39]]) #calibration: 3-sigma = either 2.7m, 1m or 2pi rads
 P_check_f[6:12,6:12,0] = np.array([[0.01,0,0,0,0,0],[0,0.01,0,0,0,0],[0,0,0.01,0,0,0],[0,0,0,0.000034,0,0],[0,0,0,0,0.000034,0],[0,0,0,0,0,0.000034]]) #position: 3-sigma = either 0.3m or pi/180 rads (1 degree)
 R_k = np.array([[0.096,0,0,0,0,0],[0,0.0003,0,0,0,0],[0,0,0.15,0,0,0],[0,0,0,0.00005,0,0],[0,0,0,0,0.00005,0],[0,0,0,0,0,0.00005]])#from get_R_2.py
@@ -134,7 +138,12 @@ v_sigma = 0.0139 #m/s (from OXTS user manual velocity rms error (roughly corresp
 Q_k_rate = np.identity(6)
 Q_k_rate[0:3,0:3] = np.square(v_sigma)*np.identity(3)
 Q_k_rate[3:6,3:6] = np.square(w_sigma)*np.identity(3)
-Q_k = np.zeros([12,12]) #preallocate the 12x12 matrix that will be used in EKF step 2
+Q_k = np.zeros((12,12)) #preallocate the 12x12 matrix that will be used in EKF step 2
+
+#preallocate G_k (doesn't change with time)
+G_k = np.zeros((6,12))
+G_k[0:6,0:6] = np.identity(6)
+G_k[0:6,6:12] = np.identity(6)
 
 for i in range(len(dataset.frame_range)):
 	omega[6*i] = dataset_raw.oxts[i].packet.vf
@@ -174,7 +183,7 @@ for i in range(len(dataset.frame_range)):
 		state_tr_mat[4:8,4:8] = Xi
 		x_check_f[:,:,i] = np.dot(state_tr_mat , x_hat_f[:,:,(i-1)])
 
-		Ad_Xi = np.zeros([6,6])
+		Ad_Xi = np.zeros((6,6))
 		Ad_Xi[0:3,0:3] = Xi[0:3,0:3]
 		Ad_Xi[3:6,3:6] = Xi[0:3,0:3]
 		r_skew = np.array([[0,-1*r[2],r[1]],[r[2],0,-1*r[0]],[-1*r[1],r[0],0]])
@@ -185,13 +194,9 @@ for i in range(len(dataset.frame_range)):
 		Q_k[6:12,6:12] = Q_k_IMU
 		P_check_f[:,:,i] = np.dot(cov_tr_mat , np.dot(P_hat_f[:,:,(i-1)] , cov_tr_mat.T) ) + Q_k
 
-	T_cam0_w = np.identity(4)
-	T_cam0_w[0:3,0:3] = dataset.T_w_cam0[i][0:3,0:3].T
-	T_cam0_w[0:3,3] = -1 * np.dot( dataset.T_w_cam0[i][0:3,0:3].T , dataset.T_w_cam0[i][0:3,3] )
+	T_v_w = np.dot( x_check_f[0:4,:], x_check_f[4:8,:])#second term is world->imu, first is imu->velodyne
+	world_points_vframe = np.dot( T_v_w , world_points_wframe )
 
-
-	#the whole world point cloud, expressed in the imu's frame at the current instant
-	world_points_iframe = np.dot( T_imu_cam0 , np.dot( T_cam0_w , world_points_wframe ) )
 	
 	velo_range = range(0, dataset.velo[i].shape[0], 100)
 	#allocate the array for storing the scan points
@@ -201,83 +206,38 @@ for i in range(len(dataset.frame_range)):
 	velo_points[:,0:3] = dataset.velo[i][velo_range, 0:3]
 	velo_points[:,3] = np.ones((len(velo_range)))
 
-	#don't need this for velo->imu because the axes are aligned the same way
-	"""
-	###########provide a good initial alignment###############
-	#TODO: Move this array creation outside the loop (it's not time dependent)
-	#(p-v frame is the velodyne frame, but rotated to (nearly) match the cam0 frame
-	T_pv_v = np.zeros((4,4))
-	T_pv_v[0:3,0:3] = np.array([[0,-1,0],[0,0,-1],[1,0,0]])#realign the axes to point the right way (ie z is up for velo but forward for cam0/world frames)
-	T_pv_v[3,3] = 1
 
-	velo_points = np.dot(T_pv_v, velo_points.T)
-	#####################################################################################################
-	"""
-	source_points = velo_points[:,0:3]
+	source_points = world_points_vframe[0:3,:].T
 	source_points = source_points.astype(np.float32)
 	pc_source = pcl.PointCloud()
 	pc_source.from_array(source_points)
 
-	target_points = world_points_iframe[0:3,:].T
+	target_points = velo_points[:,0:3]
 	target_points = target_points.astype(np.float32)
 	pc_target = pcl.PointCloud()
 	pc_target.from_array(target_points)
 
-	_, T_imu_v, _, fitness = icp(pc_source, pc_target)
-	y[6*i] = T_imu_v[0,3]
-	y[6*i + 1] = T_imu_v[1,3]
-	y[6*i + 2] = T_imu_v[2,3]
-	#next 3 lines only valid for small rotations
-	y[6*i + 3] = T_imu_v[2,1]
-	y[6*i + 4] = T_imu_v[0,2]
-	y[6*i + 5] = T_imu_v[1,0]
+	_, T_v_w_resid, _, fitness = icp(pc_source, pc_target)
 
+	T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
 	
 
 	print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
-	print('\tvelo->cam0 translation :\n\n' + str(T_cam0_v))
+	print('\tworld->velo translation :\n\n' + str(T_v_w_meas[:,:,i]))
 
-	velo_points_cam0frame = np.dot( T_cam0_v , velo_points )
+	kalman_denom = np.inv( np.dot( G_k , np.dot( P_check_f[:,:,i] , G_k.T) ) + R_k )
+	kalman = np.dot( P_check_f[:,:,i] , np.dot(G_k.T , kalman_denom) ) #EKF step 3
 
-	###Sanity check
-	
-	if i == 0:
-		f2 = plt.figure()
-		ax2 = f2.add_subplot(111, projection='3d')
+	P_hat_f[:,:,i] = np.dot( (np.identity(12)-np.dot(kalman , G_k)) , P_check_f[:,:,i] )
 
+	#get error term in Lie algebra (6x1 column)
+	error = pose_inv_map(np.dot(T_v_w_meas , np.inv(np.dot( x_check_f[0:4,:], x_check_f[4:8,:]))))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
 
-		ax2.scatter(velo_points_cam0frame[0,:],
-            		velo_points_cam0frame[1,:],
-            		velo_points_cam0frame[2,:],
-	    		color='r')
+	eps_k = np.dot(kalman , error) #12x1
+	state_hat_tr_mat = np.zeros((8,8))
+	state_hat_tr_mat[0:4,0:4] = pose_for_map(eps_k[0:6])
+	state_hat_tr_mat[4:8,4:8] = pose_for_map(eps_k[6:12])
 
-		ax2.scatter(first_scan_cframe[0,:],
-            		first_scan_cframe[1,:],
-            		first_scan_cframe[2,:])
-		ax2.set_title('Target and aligned-source velo scans at first instant, cam0 frame')
-		plt.xlabel('x')
-		plt.ylabel('y')
-		plt.show()
-	
-	###
+	x_hat_f[:,:,i] = np.dot(state_hat_tr_mat , x_check_f[:,:,i])
 
-
-
-for k in range(K+1):
-    if (k>0):
-	P_check_f[:,:,k] = P_hat_f[:,:,(k-1)]
-	x_check_f[:,k] = x_hat_f[:,(k-1)]
-    kalman = np.dot( P_check_f[:,:,k] , np.linalg.inv(P_check_f[:,:,k] + R_k) )
-    P_hat_f[:,:,k] = np.dot( np.identity(6)-kalman , P_check_f[:,:,k] )
-    x_hat_f[:,k] = x_check_f[:,k] + np.dot( kalman , y[(6*k):(6*k+6)]-x_check_f[:,k] )
-
-x_hat[:,K] = x_hat_f[:,K]
-P_hat[:,:,K] = P_hat_f[:,:,K]
-
-for k in range(K,0,-1):
-    cov_factor = np.dot( P_hat_f[:,:,k-1] , np.linalg.inv(P_check_f[:,:,k-1]) )
-    x_hat[:,k-1] = x_hat_f[:,k-1] + np.dot( cov_factor , x_hat[:,k]-x_check_f[:,k] )
-    P_hat[:,:,k-1] = P_hat_f[:,:,k-1] + np.dot( cov_factor , np.dot( P_hat[:,:,k]-P_check_f[:,:,k] , cov_factor.T ) )
-
-print(x_hat)
 
