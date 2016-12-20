@@ -125,7 +125,6 @@ P_check_f = np.zeros((12,12,K+1))
 P_hat_f = np.zeros((12,12,K+1))
 P_hat = np.zeros((12,12,K+1))
 
-T_v_w_meas = np.zeros((4,4,K+1))
 
 x_check_f[0:4,0:4,0] = np.identity(4)
 x_check_f[4:8,0:4,0] = invert_transform(np.dot(dataset.T_w_cam0[0], dataset_raw.calib.T_cam0_imu))
@@ -197,7 +196,8 @@ for i in range(len(dataset.frame_range)):
 		Ad_Xi[0:3,3:6] = np.dot( r_skew , Xi[0:3,0:3] )#lec 9, slide 47
 		cov_tr_mat = np.identity(12)
 		cov_tr_mat[6:12,6:12] = Ad_Xi
-		
+		if i==1:
+			print(Ad_Xi)
 		P_check_f[:,:,i] = np.dot(cov_tr_mat , np.dot(P_hat_f[:,:,(i-1)] , cov_tr_mat.T) ) + Q_k
 
 	T_v_w = np.dot( x_check_f[0:4,:,i], x_check_f[4:8,:,i])#second term is world->imu, first is imu->velodyne	
@@ -226,7 +226,7 @@ for i in range(len(dataset.frame_range)):
 	_, T_v_w_resid_inv, _, fitness = icp(pc_source, pc_target)
 	T_v_w_resid = invert_transform(T_v_w_resid_inv)
 
-	T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
+	T_v_w_icp = np.dot(T_v_w_resid , T_v_w )#full world->velo transformation after applying icp correction
 	
 
 	#print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
@@ -242,7 +242,7 @@ for i in range(len(dataset.frame_range)):
             	#	velo_points[:,2],
 	    	#	color='r')
 		twentieth_scan_vframe = np.dot( T_v_w , twentieth_scan_wframe )
-		twentieth_scan_vframe_post_icp = np.dot(T_v_w_meas[:,:,i] , twentieth_scan_wframe)
+		twentieth_scan_vframe_post_icp = np.dot(T_v_w_icp , twentieth_scan_wframe)
 
 		source_points = velo_points[:,0:3]
 		source_points = source_points.astype(np.float32)
@@ -282,7 +282,7 @@ for i in range(len(dataset.frame_range)):
 
 	#get error term in Lie algebra (6x1 column)
 	T_v_w_state_inv = np.linalg.inv(np.dot( x_check_f[0:4,:,i], x_check_f[4:8,:,i]))
-	error = pose_inv_map(np.dot(T_v_w_meas[:,:,i] , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
+	error = pose_inv_map(np.dot(T_v_w_icp , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
 
 	eps_k = np.dot(kalman , error) #12x1
 	state_hat_tr_mat = np.zeros((8,8))
@@ -310,16 +310,18 @@ plt.ylabel('y')
 plt.ylim((-30,0))
 plt.show()
 """
+#seed x_op with the result from the EKF pass
 for i in range(len(dataset.frame_range)):
 	if i == 0:
-		x_op = x_hat_f[:,:,i]
-	else:
-		x_op = np.append(x_op, x_hat_f[4:8,:,i] , axis = 0)
-print(x_op.shape)
-"""
+		x_op = x_hat_f[0:4,:,-1]#calib value from final timestep (likely the most accurate one)
+	x_op = np.append(x_op, x_hat_f[4:8,:,i] , axis = 0)
+
+
+T_v_w_meas=np.zeros((4,4,K+1))
+y = np.zeros((6*(K+1),1))
 #get y values for the batch method
 for i in range(len(dataset.frame_range)):
-	T_v_w = np.dot( x_op[0:4,:,i], x_check_f[4:8,:,i])#second term is world->imu, first is imu->velodyne	
+	T_v_w = np.dot( x_op[0:4,:], x_op[(4+4*i):(8+4*i),:])#second term is world->imu, first is imu->velodyne	
 	world_points_vframe = np.dot( T_v_w , world_points_wframe )
 
 	
@@ -346,4 +348,7 @@ for i in range(len(dataset.frame_range)):
 	T_v_w_resid = invert_transform(T_v_w_resid_inv)
 
 	T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
-"""
+	
+	#get error term in Lie algebra (6x1 column)
+	T_v_w_state_inv = np.linalg.inv(T_v_w)
+	y[6*i:(6*i+6),0:1] = pose_inv_map(np.dot(T_v_w_meas[:,:,i] , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
