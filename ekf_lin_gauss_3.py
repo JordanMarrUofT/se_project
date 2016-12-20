@@ -229,8 +229,8 @@ for i in range(len(dataset.frame_range)):
 	T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
 	
 
-	#print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
-	#print('\tworld->velo residual translation :\n\n' + str(T_v_w_resid))
+	print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
+	print('\tworld->velo residual translation :\n\n' + str(T_v_w_resid))
 	
 	if i == 19:
 		f2 = plt.figure()
@@ -291,7 +291,7 @@ for i in range(len(dataset.frame_range)):
 
 	x_hat_f[:,:,i] = np.dot(state_hat_tr_mat , x_check_f[:,:,i])
 	traj_f[:,i] = x_hat_f[4:7,3,i]
-"""
+
 f = plt.figure()
 ax = f.add_subplot(111, projection='3d')
 
@@ -309,41 +309,4 @@ plt.xlabel('x')
 plt.ylabel('y')
 plt.ylim((-30,0))
 plt.show()
-"""
-for i in range(len(dataset.frame_range)):
-	if i == 0:
-		x_op = x_hat_f[:,:,i]
-	else:
-		x_op = np.append(x_op, x_hat_f[4:8,:,i] , axis = 0)
-print(x_op.shape)
-"""
-#get y values for the batch method
-for i in range(len(dataset.frame_range)):
-	T_v_w = np.dot( x_op[0:4,:,i], x_check_f[4:8,:,i])#second term is world->imu, first is imu->velodyne	
-	world_points_vframe = np.dot( T_v_w , world_points_wframe )
 
-	
-	velo_range = range(0, dataset.velo[i].shape[0], 100)
-	#allocate the array for storing the scan points
-	velo_points = np.zeros((len(velo_range),4))
-
-	#store the scan in homogeneous coordinates [x y z 1]
-	velo_points[:,0:3] = dataset.velo[i][velo_range, 0:3]
-	velo_points[:,3] = np.ones((len(velo_range)))
-
-
-	source_points = velo_points[:,0:3]
-	source_points = source_points.astype(np.float32)
-	pc_source = pcl.PointCloud()
-	pc_source.from_array(source_points)
-
-	target_points = world_points_vframe[0:3,:].T
-	target_points = target_points.astype(np.float32)
-	pc_target = pcl.PointCloud()
-	pc_target.from_array(target_points)
-
-	_, T_v_w_resid_inv, _, fitness = icp(pc_source, pc_target)
-	T_v_w_resid = invert_transform(T_v_w_resid_inv)
-
-	T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
-"""
