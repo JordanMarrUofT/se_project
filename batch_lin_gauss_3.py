@@ -150,6 +150,12 @@ G_k = np.zeros((6,12))
 G_k[0:6,0:6] = np.identity(6)
 G_k[0:6,6:12] = np.identity(6)
 
+W = np.identity(6*2*(K+1))#need this for batch section, but we can populate it in the ekf section to avoid calculating it twice
+W[0:6,0:6] = P_check_f[6:12,6:12,0]
+W[6*(K+1):6*(K+2),6*(K+1):6*(K+2) = R_k
+
+F = np.identity(6*(K+1))#same thing as W, need for batch but can populate in ekf
+
 Xi = np.zeros(4,4,K+1) #Xi[:,:,0] will just stay as zeros (don't define Xi_0 <- movement before first timestep)
 
 for i in range(len(dataset.frame_range)):
@@ -167,6 +173,9 @@ for i in range(len(dataset.frame_range)):
 
 		Q_k_IMU = np.square(delta_t)*Q_k_rate #convert rate uncertainty to pose change uncertainty
 		Q_k[6:12,6:12] = Q_k_IMU
+
+		W[6*i:(6*i+6),6*i:(6*i+6)] = Q_k_IMU
+		W[6*(K+1+i):6*(K+2+i),6*(K+1+i):6*(K+2+i) = R_k
 		#Pose change forward mapping
 		a = delta_p[3:6]#column of rotational deltas
 		phi = np.linalg.norm(a)
@@ -198,6 +207,8 @@ for i in range(len(dataset.frame_range)):
 		Ad_Xi[0:3,3:6] = np.dot( r_skew , Xi[0:3,0:3,i] )#lec 9, slide 47
 		cov_tr_mat = np.identity(12)
 		cov_tr_mat[6:12,6:12] = Ad_Xi
+
+		F[6*i:6*(i+1),6*(i-1):6*i] = -1*Ad_Xi
 		if i==1:
 			print(Ad_Xi)
 		P_check_f[:,:,i] = np.dot(cov_tr_mat , np.dot(P_hat_f[:,:,(i-1)] , cov_tr_mat.T) ) + Q_k
@@ -362,4 +373,40 @@ for i in range(len(dataset.frame_range)):
 	if i>0:
 		e_v[6*i:(6*i+6),0:1] = pose_inv_map(np.dot(Xi[:,:,i] , np.dot( x_op[4*(i-1):(4*(i-1)+4),:] , invert_transform(x_op[4*i:(4*i+4),:]))))
 
-#P_check_f[6:12,6:12,0]
+e = np.append(e_v , e_y , axis = 0)
+
+#create G and finish up F by append zeros
+G = np.identity(6*(K+1))
+ones_col = np.identity(6)
+for i in range(len(dataset.frame_range)):
+	if i>0:
+		ones_col = np.append(ones_col, np.identity(6), axis = 0)
+
+G = np.append(G, ones_col, axis=1)#horizontal append
+F = np.append(F, np.zeros((6*(K+1),6)), axis=1)#horizontal append
+
+H = np.append(F, G, axis=0)#vertical append
+
+A = np.dot( H.T, np.linalg.solve(W, H))
+b = np.dot( H.T, np.linalg.solve(W, e))
+
+A_11 = A[0:6*(K+1),0:6*(K+1)]
+A_12 = A[0:6*(K+1),6*(K+1):6*(K+2)]
+A_22 = A[6*(K+1):6*(K+2),6*(K+1):6*(K+2)]
+
+L_11 = np.linalg.cholesky(A_11)
+L_21 = np.linalg.solve(L_11, A_12).T
+L_22 = np.linalg.cholesky(A_22 - np.dot(L_21, L_21.T))
+
+L_right = np.append(0*L_21.T, L_22, axis=0)# L_12 (which is just 0 of size equal to L_21 transpose), and L_22
+L = np.append(L_11, L_21, axis=0)
+L = np.append(L, L_right, axis=1)
+
+y = np.linalg.solve(L,b)
+dx = np.linalg.solve(L.T,y)
+
+for i in range(len(dataset.frame_range)):
+	x_op[4*i:4*(i+1),:] = np.dot(pose_for_map(dx[6*i:6*(i+1)]) , x_op[4*i:4*(i+1),:])#adjust imu poses
+
+x_op[-4:-1,:] = np.dot(pose_for_map(dx[-6:-1]) , x_op[-4:-1,:])#adjust calibration
+
