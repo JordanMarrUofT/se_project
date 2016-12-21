@@ -150,6 +150,8 @@ G_k = np.zeros((6,12))
 G_k[0:6,0:6] = np.identity(6)
 G_k[0:6,6:12] = np.identity(6)
 
+Xi = np.zeros(4,4,K+1) #Xi[:,:,0] will just stay as zeros (don't define Xi_0 <- movement before first timestep)
+
 for i in range(len(dataset.frame_range)):
 	omega[6*i] = dataset_raw.oxts[i].packet.vf
 	omega[6*i + 1] = dataset_raw.oxts[i].packet.vl
@@ -181,19 +183,19 @@ for i in range(len(dataset.frame_range)):
 
 		r = np.dot( J , delta_p[0:3] )
 
-		Xi = np.identity(4)
-		Xi[0:3,0:3] = C
-		Xi[0:3,3] = r
+		Xi[:,:,i] = np.identity(4)
+		Xi[0:3,0:3,i] = C
+		Xi[0:3,3,i] = r
 
 		state_check_tr_mat = np.identity(8)
-		state_check_tr_mat[4:8,4:8] = Xi
+		state_check_tr_mat[4:8,4:8] = Xi[:,:,i]
 		x_check_f[:,:,i] = np.dot(state_check_tr_mat , x_hat_f[:,:,(i-1)])
 
 		Ad_Xi = np.zeros((6,6))
-		Ad_Xi[0:3,0:3] = Xi[0:3,0:3]
-		Ad_Xi[3:6,3:6] = Xi[0:3,0:3]
+		Ad_Xi[0:3,0:3] = Xi[0:3,0:3,i]
+		Ad_Xi[3:6,3:6] = Xi[0:3,0:3,i]
 		r_skew = np.array([[0,-1*r[2],r[1]],[r[2],0,-1*r[0]],[-1*r[1],r[0],0]])
-		Ad_Xi[0:3,3:6] = np.dot( r_skew , Xi[0:3,0:3] )#lec 9, slide 47
+		Ad_Xi[0:3,3:6] = np.dot( r_skew , Xi[0:3,0:3,i] )#lec 9, slide 47
 		cov_tr_mat = np.identity(12)
 		cov_tr_mat[6:12,6:12] = Ad_Xi
 		if i==1:
@@ -313,15 +315,20 @@ plt.show()
 #seed x_op with the result from the EKF pass
 for i in range(len(dataset.frame_range)):
 	if i == 0:
-		x_op = x_hat_f[0:4,:,-1]#calib value from final timestep (likely the most accurate one)
-	x_op = np.append(x_op, x_hat_f[4:8,:,i] , axis = 0)
+		T_zero_check = x_hat_f[4:8,:,i] #will use this as a seed value, will show up in all calculations for e_v_0(x_op)
+		x_op = T_zero_check
+	else:
+		x_op = np.append(x_op, x_hat_f[4:8,:,i] , axis = 0)
+x_op = np.append(x_op, x_hat_f[0:4,:,-1], axis = 0)#calib value from final timestep (likely the most accurate one)
 
 
 T_v_w_meas=np.zeros((4,4,K+1))
-y = np.zeros((6*(K+1),1))
+e_y = np.zeros((6*(K+1),1))
+e_v = np.zeros((6*(K+1),1))
+#e_v[0:6,0:1] = ... will just be zeros on first pass (first x_op value is still just the T_zero_check value we seed it with)
 #get y values for the batch method
 for i in range(len(dataset.frame_range)):
-	T_v_w = np.dot( x_op[0:4,:], x_op[(4+4*i):(8+4*i),:])#second term is world->imu, first is imu->velodyne	
+	T_v_w = np.dot( x_op[-4:-1,:], x_op[(4*i):(4*i+4),:])#second term is world->imu, first is imu->velodyne	
 	world_points_vframe = np.dot( T_v_w , world_points_wframe )
 
 	
@@ -351,4 +358,8 @@ for i in range(len(dataset.frame_range)):
 	
 	#get error term in Lie algebra (6x1 column)
 	T_v_w_state_inv = np.linalg.inv(T_v_w)
-	y[6*i:(6*i+6),0:1] = pose_inv_map(np.dot(T_v_w_meas[:,:,i] , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
+	e_y[6*i:(6*i+6),0:1] = pose_inv_map(np.dot(T_v_w_meas[:,:,i] , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
+	if i>0:
+		e_v[6*i:(6*i+6),0:1] = pose_inv_map(np.dot(Xi[:,:,i] , np.dot( x_op[4*(i-1):(4*(i-1)+4),:] , invert_transform(x_op[4*i:(4*i+4),:]))))
+
+#P_check_f[6:12,6:12,0]
