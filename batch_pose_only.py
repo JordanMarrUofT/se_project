@@ -6,7 +6,7 @@ from pcl.registration import icp, gicp, icp_nl
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
-from util import pose_inv_map, rot_for_map, pose_for_map, invert_transform
+from util import pose_inv_map, rot_for_map, pose_for_map, invert_transform, skew
 
 import pykitti
 
@@ -60,11 +60,12 @@ dataset_raw.load_velo()         # Each scan is a Nx4 array of [x,y,z,reflectance
 np.set_printoptions(precision=4, suppress=True)
 
 #allocate the trajectory array
-traj = np.zeros((3,len(dataset.frame_range)))
+traj_velo = np.zeros((3,len(dataset.frame_range)))
+traj_imu = np.zeros((3,len(dataset.frame_range)))
 traj_f = np.zeros((3,len(dataset.frame_range)))
 
-print('First IMU pose')
-print(invert_transform(np.dot(dataset.T_w_cam0[0], dataset_raw.calib.T_cam0_imu)))
+#print('First IMU pose')
+#print(invert_transform(np.dot(dataset.T_w_cam0[0], dataset_raw.calib.T_cam0_imu)))
 #create the world-frame whole point cloud
 for i in range(len(dataset.frame_range)):
 
@@ -82,9 +83,10 @@ for i in range(len(dataset.frame_range)):
 	velo_points_cframe = np.dot(dataset_raw.calib.T_cam0unrect_velo , velo_points.T)
 
 	#grab the trajectory file
-	traj[:,i] = invert_transform(np.dot(dataset.T_w_cam0[i], dataset_raw.calib.T_cam0_imu))[0:3,3]
-	
-	
+	T_v_w_gt = invert_transform(np.dot(dataset.T_w_cam0[i], dataset_raw.calib.T_cam0unrect_velo))
+	traj_velo[:,i] = -1*np.dot(T_v_w_gt[0:3,0:3].T , T_v_w_gt[0:3,3])
+	T_i_w_gt = invert_transform(np.dot(dataset.T_w_cam0[i], dataset_raw.calib.T_cam0_imu))
+	traj_imu[:,i] = -1*np.dot(T_i_w_gt[0:3,0:3].T , T_i_w_gt[0:3,3])
 
 	if i == 0:
 		#world_points_wframe is 4 x npoints
@@ -144,6 +146,7 @@ v_sigma = 0.0139 #m/s (from OXTS user manual velocity rms error (roughly corresp
 Q_k_rate = np.identity(6)
 Q_k_rate[0:3,0:3] = np.square(v_sigma)*np.identity(3)
 Q_k_rate[3:6,3:6] = np.square(w_sigma)*np.identity(3)
+Q_k_rate = Q_k_rate
 
 Q_k = np.zeros((12,12)) #preallocate the 12x12 matrix that will be used in EKF step 2
 
@@ -172,6 +175,7 @@ for i in range(len(dataset.frame_range)):
 		delta_t = delta_t - (dataset.timestamps[i-1].seconds + float(dataset.timestamps[i-1].microseconds)/1000000)
 		delta_p = delta_t*omega[6*i:(6*i + 6)].T #transpose to make it a column
 		delta_p = -1*delta_p
+		print(delta_p)
 
 		Q_k_IMU = np.square(delta_t)*Q_k_rate #convert rate uncertainty to pose change uncertainty
 		Q_k[6:12,6:12] = Q_k_IMU
@@ -203,10 +207,16 @@ for i in range(len(dataset.frame_range)):
 		x_check_f[:,:,i] = np.dot(state_check_tr_mat , x_hat_f[:,:,(i-1)])
 
 		Ad_Xi = np.zeros((6,6))
+		"""
 		Ad_Xi[0:3,0:3] = Xi[0:3,0:3,i]
 		Ad_Xi[3:6,3:6] = Xi[0:3,0:3,i]
 		r_skew = np.array([[0,-1*r[2],r[1]],[r[2],0,-1*r[0]],[-1*r[1],r[0],0]])
 		Ad_Xi[0:3,3:6] = np.dot( r_skew , Xi[0:3,0:3,i] )#lec 9, slide 47
+		"""
+		Ad_Xi[0:3,0:3] = skew(delta_p[3:6])
+		Ad_Xi[3:6,3:6] = Ad_Xi[0:3,0:3]
+		Ad_Xi[0:3,3:6] = skew(delta_p[0:3])
+
 		cov_tr_mat = np.identity(12)
 		cov_tr_mat[6:12,6:12] = Ad_Xi
 
@@ -245,7 +255,7 @@ for i in range(len(dataset.frame_range)):
 
 	#print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
 	#print('\tworld->velo residual translation :\n\n' + str(T_v_w_resid))
-	
+	"""
 	if i == 19:
 		f2 = plt.figure()
 		ax2 = f2.add_subplot(111, projection='3d')
@@ -288,7 +298,7 @@ for i in range(len(dataset.frame_range)):
 		plt.xlabel('x')
 		plt.ylabel('y')
 		plt.show()
-	
+	"""
 	kalman_denom = np.linalg.inv( np.dot( G_k , np.dot( P_check_f[:,:,i] , G_k.T) ) + R_k )
 	kalman = np.dot( P_check_f[:,:,i] , np.dot(G_k.T , kalman_denom) ) #EKF step 3
 
@@ -306,7 +316,7 @@ for i in range(len(dataset.frame_range)):
 
 	x_hat_f[:,:,i] = np.dot(state_hat_tr_mat , x_check_f[:,:,i])
 	traj_f[:,i] = x_hat_f[4:7,3,i]
-
+"""
 f = plt.figure()
 ax = f.add_subplot(111, projection='3d')
 
@@ -325,7 +335,7 @@ plt.xlabel('x')
 plt.ylabel('y')
 plt.ylim((-30,0))
 #plt.show()
-
+"""
 #seed x_op with the result from the EKF pass
 for i in range(len(dataset.frame_range)):
 	if i == 0:
@@ -337,15 +347,18 @@ for i in range(len(dataset.frame_range)):
 x_op = np.append(x_op, x_hat_f[0:4,:,-1], axis = 0)#calib value from final timestep (likely the most accurate one)
 #x_op = np.append(x_op, dataset_raw.calib.T_velo_imu , axis = 0)
 
-traj_b = np.zeros((3,len(dataset.frame_range)))
-traj_meas = np.zeros((3,len(dataset.frame_range)))
+traj_velo_b = np.zeros((3,len(dataset.frame_range)))
+traj_imu_b = np.zeros((3,len(dataset.frame_range)))
+traj_velo_meas = np.zeros((3,len(dataset.frame_range)))
+traj_imu_meas = np.zeros((3,len(dataset.frame_range)))
 T_v_w_meas=np.zeros((4,4,K+1))
 e_y = np.zeros((6*(K+1),1))
 e_v = np.zeros((6*(K+1),1))
 #e_v[0:6,0:1] = ... will just be zeros on first pass (first x_op value is still just the T_zero_check value we seed it with)
 
 #finish creating F by appending zeros
-F = np.append(F, np.zeros((6*(K+1),6)), axis=1)#horizontal append
+#F = np.append(F, np.zeros((6*(K+1),6)), axis=1)#horizontal append
+#print(F)
 
 for num_batch_it in range(100):
 
@@ -380,21 +393,22 @@ for num_batch_it in range(100):
 			T_v_w_resid = invert_transform(T_v_w_resid_inv)
 		
 			T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
-			traj_meas[:,i] = np.dot(invert_transform(x_op[-4:,:]), T_v_w_meas[:,:,i])[0:3,3]
+			traj_velo_meas[:,i] = -1*np.dot(T_v_w_meas[0:3,0:3,i].T, T_v_w_meas[0:3,3,i])
+			T_i_w_meas = np.dot(invert_transform(x_op[-4:,:]) , T_v_w_meas[:,:,i] )
+			traj_imu_meas[:,i] = -1*np.dot(T_i_w_meas[0:3,0:3].T, T_i_w_meas[0:3,3])
 	
 		#get error term in Lie algebra (6x1 column)
-		T_v_w_state_inv = np.linalg.inv(T_v_w)
+		T_v_w_state_inv = invert_transform(T_v_w)
 		e_y[6*i:(6*i+6),0:1] = pose_inv_map(np.dot(T_v_w_meas[:,:,i] , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
 		if i>0 and num_batch_it > 0:
 			debugger = np.dot(Xi[:,:,i] , np.dot( x_op[4*(i-1):(4*(i-1)+4),:] , invert_transform(x_op[4*i:(4*i+4),:])))
-			#print(debugger)
 			e_v[6*i:(6*i+6),0:1] = pose_inv_map(debugger)
 	
 	if num_batch_it > 0:
 		e_v[0:6] = pose_inv_map(np.dot(T_zero_check , invert_transform(x_op[0:4,:])))
 
 	e_v = 0*e_v #TODO
-	print(e_y)
+	#print(e_y)
 	e = np.append(e_v , e_y , axis = 0)
 	e = np.nan_to_num(e)
 	
@@ -406,27 +420,37 @@ for num_batch_it in range(100):
 		if i>0:
 			ones_col = np.append(ones_col, np.identity(6), axis = 0)
 
-	G = np.append(G, ones_col, axis=1)#horizontal append
+	#G = np.append(G, ones_col, axis=1)#horizontal append
+	
 	
 
 	H = np.append(F, G, axis=0)#vertical append
+
+	##########TRYING SOME STUFF
+	H = G
+	e = e_y
+	if num_batch_it == 0:
+		W = W[6*(K+1):,6*(K+1):]
+
+	###########################
 
 	A = np.dot( H.T, np.linalg.solve(W, H))
 	b = np.dot( H.T, np.linalg.solve(W, e))
 
 	
 
-	A_11 = A[0:6*(K+1),0:6*(K+1)]
-	A_12 = A[0:6*(K+1),6*(K+1):6*(K+2)]
-	A_22 = A[6*(K+1):6*(K+2),6*(K+1):6*(K+2)]
+	#A_11 = A[0:6*(K+1),0:6*(K+1)]
+	#A_12 = A[0:6*(K+1),6*(K+1):6*(K+2)]
+	#A_22 = A[6*(K+1):6*(K+2),6*(K+1):6*(K+2)]
 
-	L_11 = np.linalg.cholesky(A_11)
-	L_21 = np.linalg.solve(L_11, A_12).T
-	L_22 = np.linalg.cholesky(A_22 - np.dot(L_21, L_21.T))
+	#L_11 = np.linalg.cholesky(A_11)
+	#L_21 = np.linalg.solve(L_11, A_12).T
+	#L_22 = np.linalg.cholesky(A_22 - np.dot(L_21, L_21.T))
 
-	L_right = np.append(0*L_21.T, L_22, axis=0)# L_12 (which is just 0 of size equal to L_21 transpose), and L_22
-	L = np.append(L_11, L_21, axis=0)
-	L = np.append(L, L_right, axis=1)
+	#L_right = np.append(0*L_21.T, L_22, axis=0)# L_12 (which is just 0 of size equal to L_21 transpose), and L_22
+	#L = np.append(L_11, L_21, axis=0)
+	#L = np.append(L, L_right, axis=1)
+	L = np.linalg.cholesky(A) #TODO
 
 	y = np.linalg.solve(L,b)
 	dx = np.linalg.solve(L.T,y)
@@ -434,48 +458,106 @@ for num_batch_it in range(100):
 
 	for i in range(len(dataset.frame_range)):
 		x_op[4*i:4*(i+1),:] = np.dot(pose_for_map(dx[6*i:6*(i+1)]) , x_op[4*i:4*(i+1),:])#adjust imu poses
-		traj_b[:,i] = x_op[4*i:4*(i+1)-1,3]
-	
-	x_op[-4:,:] = np.dot(pose_for_map(dx[-6:]) , x_op[-4:,:])#adjust calibration #TODO
-
+		T_v_w_b = np.dot(x_op[-4:,:], x_op[4*i:4*(i+1),:])
+		traj_velo_b[:,i] = -1*np.dot(T_v_w_b[0:3,0:3].T , T_v_w_b[0:3,3])
+		traj_imu_b[:,i] = -1*np.dot(x_op[4*i:4*(i+1)-1,0:3].T, x_op[4*i:4*(i+1)-1,3])
+			
+	#x_op[-4:,:] = np.dot(pose_for_map(dx[-6:]) , x_op[-4:,:])#adjust calibration #TODO
+	#print(pose_for_map(dx[-6:]))
+	#print(x_op[-4:,:])
+	"""
 	f2 = plt.figure()
 	ax2 = f2.add_subplot(111, projection='3d')
 
 
-	ax2.scatter(traj_b[0,:],
-            traj_b[1,:],
-            traj_b[2,:])
+	ax2.scatter(traj_velo_b[0,:],
+            traj_velo_b[1,:],
+            traj_velo_b[2,:])
 
-	ax2.scatter(traj[0,:],
-            traj[1,:],
-            traj[2,:],
+	ax2.scatter(traj_velo[0,:],
+            traj_velo[1,:],
+            traj_velo[2,:],
 	    color='r')
 
-	ax2.set_title('imu estimated (blue) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
+	ax2.scatter(traj_velo_meas[0,:],
+            traj_velo_meas[1,:],
+            traj_velo_meas[2,:],
+	    color='g')
+
+	ax2.set_title('velo estimated (blue), measured (green) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
 	plt.xlabel('x')
 	plt.ylabel('y')
-	plt.ylim((-30,0))
+	#plt.ylim((-30,0))
+
+	f3 = plt.figure()
+	ax3 = f3.add_subplot(111, projection='3d')
+
+
+	ax3.scatter(traj_imu_b[0,:],
+            traj_imu_b[1,:],
+            traj_imu_b[2,:])
+	
+	ax3.scatter(traj_imu_meas[0,:],
+            traj_imu_meas[1,:],
+            traj_imu_meas[2,:],
+	    color='g')
+
+	ax3.scatter(traj_imu[0,:],
+            traj_imu[1,:],
+            traj_imu[2,:],
+	    color='r')
+
+	ax3.set_title('imu estimated (blue) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
+	plt.xlabel('x')
+	plt.ylabel('y')
+	#plt.ylim((-30,0))
 
 	plt.show()
-"""
+	"""
 f2 = plt.figure()
 ax2 = f2.add_subplot(111, projection='3d')
 
 
-ax2.scatter(traj_b[0,:],
-            traj_b[1,:],
-            traj_b[2,:])
+ax2.scatter(traj_velo_b[0,:],
+            traj_velo_b[1,:],
+            traj_velo_b[2,:])
 
-ax2.scatter(traj[0,:],
-            traj[1,:],
-            traj[2,:],
+ax2.scatter(traj_velo[0,:],
+            traj_velo[1,:],
+            traj_velo[2,:],
 	    color='r')
 
-ax2.set_title('imu estimated (blue) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
+ax2.scatter(traj_velo_meas[0,:],
+            traj_velo_meas[1,:],
+            traj_velo_meas[2,:],
+	    color='g')
+
+ax2.set_title('velo estimated (blue), measured (green) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
 plt.xlabel('x')
 plt.ylabel('y')
-plt.ylim((-30,0))
+#plt.ylim((-30,0))
+
+f3 = plt.figure()
+ax3 = f3.add_subplot(111, projection='3d')
+
+
+ax3.scatter(traj_imu_b[0,:],
+            traj_imu_b[1,:],
+            traj_imu_b[2,:])
+	
+ax3.scatter(traj_imu_meas[0,:],
+            traj_imu_meas[1,:],
+            traj_imu_meas[2,:],
+	    color='g')
+
+ax3.scatter(traj_imu[0,:],
+            traj_imu[1,:],
+            traj_imu[2,:],
+	    color='r')
+
+ax3.set_title('imu estimated (blue) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
+plt.xlabel('x')
+plt.ylabel('y')
+#plt.ylim((-30,0))
 
 plt.show()
-"""
-
