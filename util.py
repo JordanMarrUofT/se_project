@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.linalg import logm
 
 def skew(p):
 	p_skew = np.array([[0,-1*p[2],p[1]],[p[2],0,-1*p[0]],[-1*p[1],p[0],0]])
@@ -16,16 +17,11 @@ def pose_inv_map(T_mat):
 	phi = np.arccos( (0.5)*(np.trace(T_mat[0:3,0:3])-1) )
 	phi = np.nan_to_num(phi)
 	if phi != 0:
-		a_skew = np.array([[0,-1*a[2],a[1]],[a[2],0,-1*a[0]],[-1*a[1],a[0],0]])
-
-		J = (1/phi)*np.sin(phi)*np.identity(3)
-		J = J + (1 - (1/phi)*np.sin(phi))*np.dot( a , a.T )
-		J = J + (1/phi)*(1 - np.cos(phi))*a_skew
-
-		rho = np.dot( np.linalg.inv(J) , T_mat[0:3,3] )
-		th1 = phi*a[0]
-		th2 = phi*a[1]
-		th3 = phi*a[2]
+		lnT = logm(T_mat)
+		th1 = lnT[2,1]
+		th2 = lnT[0,2]
+		th3 = lnT[1,0]
+		rho = lnT[0:3,3]
 	else:
 		rho = T_mat[0:3,3]
 		th1 = 0
@@ -86,3 +82,13 @@ def invert_transform(T_inv):
 	T[0:3,3] = -1 * np.dot( T_inv[0:3,0:3].T , T_inv[0:3,3] )
 
 	return T
+
+def get_adjoint(T):
+	#build an adjoint (Lie group - slide 47)
+
+	T_Ad = np.identity(6)
+	T_Ad[0:3,0:3] = T[0:3,0:3]
+	T_Ad[3:6,3:6] = T[0:3,0:3]
+	T_Ad[0:3,3:6] = np.dot(skew(T[0:3,3]), T[0:3,0:3])
+
+	return T_Ad

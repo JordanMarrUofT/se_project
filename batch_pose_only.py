@@ -6,7 +6,7 @@ from pcl.registration import icp, gicp, icp_nl
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
-from util import pose_inv_map, rot_for_map, pose_for_map, invert_transform, skew
+from util import pose_inv_map, rot_for_map, pose_for_map, invert_transform, skew, get_adjoint
 
 import pykitti
 
@@ -64,8 +64,6 @@ traj_velo = np.zeros((3,len(dataset.frame_range)))
 traj_imu = np.zeros((3,len(dataset.frame_range)))
 traj_f = np.zeros((3,len(dataset.frame_range)))
 
-#print('First IMU pose')
-#print(invert_transform(np.dot(dataset.T_w_cam0[0], dataset_raw.calib.T_cam0_imu)))
 #create the world-frame whole point cloud
 for i in range(len(dataset.frame_range)):
 
@@ -175,7 +173,6 @@ for i in range(len(dataset.frame_range)):
 		delta_t = delta_t - (dataset.timestamps[i-1].seconds + float(dataset.timestamps[i-1].microseconds)/1000000)
 		delta_p = delta_t*omega[6*i:(6*i + 6)].T #transpose to make it a column
 		delta_p = -1*delta_p
-		print(delta_p)
 
 		Q_k_IMU = np.square(delta_t)*Q_k_rate #convert rate uncertainty to pose change uncertainty
 		Q_k[6:12,6:12] = Q_k_IMU
@@ -207,7 +204,7 @@ for i in range(len(dataset.frame_range)):
 		x_check_f[:,:,i] = np.dot(state_check_tr_mat , x_hat_f[:,:,(i-1)])
 
 		Ad_Xi = np.zeros((6,6))
-		"""
+		
 		Ad_Xi[0:3,0:3] = Xi[0:3,0:3,i]
 		Ad_Xi[3:6,3:6] = Xi[0:3,0:3,i]
 		r_skew = np.array([[0,-1*r[2],r[1]],[r[2],0,-1*r[0]],[-1*r[1],r[0],0]])
@@ -216,7 +213,7 @@ for i in range(len(dataset.frame_range)):
 		Ad_Xi[0:3,0:3] = skew(delta_p[3:6])
 		Ad_Xi[3:6,3:6] = Ad_Xi[0:3,0:3]
 		Ad_Xi[0:3,3:6] = skew(delta_p[0:3])
-
+		"""
 		cov_tr_mat = np.identity(12)
 		cov_tr_mat[6:12,6:12] = Ad_Xi
 
@@ -305,7 +302,7 @@ for i in range(len(dataset.frame_range)):
 	P_hat_f[:,:,i] = np.dot( (np.identity(12)-np.dot(kalman , G_k)) , P_check_f[:,:,i] )
 
 	#get error term in Lie algebra (6x1 column)
-	T_v_w_state_inv = np.linalg.inv(np.dot( x_check_f[0:4,:,i], x_check_f[4:8,:,i]))
+	T_v_w_state_inv = invert_transform(np.dot( x_check_f[0:4,:,i], x_check_f[4:8,:,i]))
 	error = pose_inv_map(np.dot(T_v_w_icp , T_v_w_state_inv))#compare measured (ICP) world->velo transform to what the state says it should be TODO: this might just be the same as T_v_w_resid so perhaps just need pose_inv_map(T_v_w_resid)
 
 	eps_k = np.dot(kalman , error) #12x1
@@ -403,11 +400,12 @@ for num_batch_it in range(100):
 		if i>0 and num_batch_it > 0:
 			debugger = np.dot(Xi[:,:,i] , np.dot( x_op[4*(i-1):(4*(i-1)+4),:] , invert_transform(x_op[4*i:(4*i+4),:])))
 			e_v[6*i:(6*i+6),0:1] = pose_inv_map(debugger)
+			F[6*i:6*(i+1),6*(i-1):6*i] = -1*get_adjoint(np.dot(x_op[4*i:(4*i+4),:],invert_transform(x_op[4*(i-1):(4*(i-1)+4),:])))
 	
 	if num_batch_it > 0:
 		e_v[0:6] = pose_inv_map(np.dot(T_zero_check , invert_transform(x_op[0:4,:])))
 
-	e_v = 0*e_v #TODO
+	#e_v = 0*e_v #TODO
 	#print(e_y)
 	e = np.append(e_v , e_y , axis = 0)
 	e = np.nan_to_num(e)
@@ -425,7 +423,7 @@ for num_batch_it in range(100):
 	
 
 	H = np.append(F, G, axis=0)#vertical append
-
+	"""
 	##########TRYING SOME STUFF
 	H = G
 	e = e_y
@@ -433,7 +431,7 @@ for num_batch_it in range(100):
 		W = W[6*(K+1):,6*(K+1):]
 
 	###########################
-
+	"""
 	A = np.dot( H.T, np.linalg.solve(W, H))
 	b = np.dot( H.T, np.linalg.solve(W, e))
 
@@ -457,6 +455,8 @@ for num_batch_it in range(100):
 
 
 	for i in range(len(dataset.frame_range)):
+		#Might need to insert adjustment here for dx=[0 0 0 0 0 0]
+
 		x_op[4*i:4*(i+1),:] = np.dot(pose_for_map(dx[6*i:6*(i+1)]) , x_op[4*i:4*(i+1),:])#adjust imu poses
 		T_v_w_b = np.dot(x_op[-4:,:], x_op[4*i:4*(i+1),:])
 		traj_velo_b[:,i] = -1*np.dot(T_v_w_b[0:3,0:3].T , T_v_w_b[0:3,3])
@@ -514,6 +514,7 @@ for num_batch_it in range(100):
 
 	plt.show()
 	"""
+
 f2 = plt.figure()
 ax2 = f2.add_subplot(111, projection='3d')
 
@@ -535,7 +536,8 @@ ax2.scatter(traj_velo_meas[0,:],
 ax2.set_title('velo estimated (blue), measured (green) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
 plt.xlabel('x')
 plt.ylabel('y')
-#plt.ylim((-30,0))
+plt.xlim((-30,0))
+plt.ylim((-30,0))
 
 f3 = plt.figure()
 ax3 = f3.add_subplot(111, projection='3d')
@@ -558,6 +560,8 @@ ax3.scatter(traj_imu[0,:],
 ax3.set_title('imu estimated (blue) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
 plt.xlabel('x')
 plt.ylabel('y')
-#plt.ylim((-30,0))
+plt.xlim((-30,0))
+plt.ylim((-30,0))
 
 plt.show()
+
