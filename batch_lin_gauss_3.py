@@ -17,7 +17,8 @@ basedir = '/media/stars-jordan/Data/KITTI/odometry/dataset'
 sequence = '06'
 
 # Optionally, specify the frame range to load
-frame_range = range(0, 20, 1)
+frame_range = range(0, 50, 1)
+total_num_batch_it = 100
 
 # Load the data
 # dataset = pykitti.odometry(basedir, sequence)
@@ -37,7 +38,7 @@ date = '2011_09_30'
 drive = '0020'
 
 # Optionally, specify the frame range to load
-#Raw dataset frame_range doesn't really matter for our purposes as we just need the velo->cam0 transform from it
+#Raw dataset frame_range doesn't really matter for our purposes as we just need the calibrations from it
 frame_range = range(0, 100, 1)
 
 # Load the data
@@ -62,7 +63,7 @@ traj_f = np.zeros((3,len(dataset.frame_range)))
 for i in range(len(dataset.frame_range)):
 
 	#subsample the velodyne scans
-	velo_range = range(0, dataset.velo[i].shape[0], 100)
+	velo_range = range(50, dataset.velo[i].shape[0], 100)#TODO: This line controls how many common points the source and target point clouds will have
 
 	#allocate the array for storing the scan points
 	velo_points = np.zeros((len(velo_range),4))
@@ -151,7 +152,7 @@ for i in range(len(dataset.frame_range)):
 		Q_k_IMU = np.square(delta_t)*Q_k_rate #convert rate uncertainty to pose change uncertainty
 		Q_k[6:12,6:12] = Q_k_IMU
 
-		W[6*i:(6*i+6),6*i:(6*i+6)] = Q_k_IMU
+		W[6*i:(6*i+6),6*i:(6*i+6)] = 5000*Q_k_IMU
 		W[6*(K+1+i):6*(K+2+i),6*(K+1+i):6*(K+2+i)] = R_k
 		#Pose change forward mapping
 		a = delta_p[3:6]#column of rotational deltas
@@ -226,7 +227,7 @@ for i in range(len(dataset.frame_range)):
 
 	#print('Alignment fitness at time k = ' + str(i) + ': ' + str(fitness))
 	#print('\tworld->velo residual translation :\n\n' + str(T_v_w_resid))
-	"""
+	
 	if i == 19:
 		f2 = plt.figure()
 		ax2 = f2.add_subplot(111, projection='3d')
@@ -266,10 +267,10 @@ for i in range(len(dataset.frame_range)):
             		velo_points[:,2],
 	    		color='r')
 		ax2.set_title('Target and aligned-source velo scans at 20th instant, velo frame')
-		plt.xlabel('x')
-		plt.ylabel('y')
+		plt.xlabel('x (m)')
+		plt.ylabel('y (m)')
 		plt.show()
-	"""
+	
 	kalman_denom = np.linalg.inv( np.dot( G_k , np.dot( P_check_f[:,:,i] , G_k.T) ) + R_k )
 	kalman = np.dot( P_check_f[:,:,i] , np.dot(G_k.T , kalman_denom) ) #EKF step 3
 
@@ -288,6 +289,10 @@ for i in range(len(dataset.frame_range)):
 	x_hat_f[:,:,i] = np.dot(state_hat_tr_mat , x_check_f[:,:,i])
 	traj_f[:,i] = x_hat_f[4:7,3,i]
 
+e_pose_oneit = np.zeros((6,K+1))
+e_pose_rms = np.zeros((6,total_num_batch_it+1))
+e_calib = np.zeros((6,total_num_batch_it+1))
+
 #seed x_op with the result from the EKF pass
 for i in range(len(dataset.frame_range)):
 	if i == 0:
@@ -295,9 +300,14 @@ for i in range(len(dataset.frame_range)):
 		x_op = T_zero_check
 	else:
 		x_op = np.append(x_op, x_hat_f[4:8,:,i] , axis = 0)
+	T_i_w_gt = invert_transform(np.dot(dataset.T_w_cam0[i], dataset_raw.calib.T_cam0_imu))
+	e_pose_oneit[:,i:i+1] = pose_inv_map(np.dot(T_i_w_gt , invert_transform(x_hat_f[4:8,:,i])))
 
 x_op = np.append(x_op, x_hat_f[0:4,:,-1], axis = 0)#calib value from final timestep (likely the most accurate one)
 #x_op = np.append(x_op, dataset_raw.calib.T_velo_imu , axis = 0)
+
+e_calib[:,0:1] = pose_inv_map(np.dot(dataset_raw.calib.T_velo_imu , invert_transform(x_op[-4:,:])))
+e_pose_rms[:,0] = np.sqrt(K+1)*np.linalg.norm(e_pose_oneit, axis=1)
 
 traj_velo_b = np.zeros((3,len(dataset.frame_range)))
 traj_imu_b = np.zeros((3,len(dataset.frame_range)))
@@ -308,9 +318,9 @@ e_y = np.zeros((6*(K+1),1))
 e_v = np.zeros((6*(K+1),1))
 #e_v[0:6,0:1] = ... will just be zeros on first pass (first x_op value is still just the T_zero_check value we seed it with)
 
+fitness_vec = np.zeros((K+1))
 
-
-for num_batch_it in range(100):
+for num_batch_it in range(total_num_batch_it):
 
 	#get y values for the batch method
 	for i in range(len(dataset.frame_range)):
@@ -341,6 +351,7 @@ for num_batch_it in range(100):
 
 			_, T_v_w_resid_inv, _, fitness = icp(pc_source, pc_target)
 			T_v_w_resid = invert_transform(T_v_w_resid_inv)
+			fitness_vec[i] = fitness
 		
 			T_v_w_meas[:,:,i] = np.dot(T_v_w_resid , T_v_w )
 			traj_velo_meas[:,i] = -1*np.dot(T_v_w_meas[0:3,0:3,i].T, T_v_w_meas[0:3,3,i])
@@ -403,11 +414,17 @@ for num_batch_it in range(100):
 		T_v_w_b = np.dot(x_op[-4:,:], x_op[4*i:4*(i+1),:])
 		traj_velo_b[:,i] = -1*np.dot(T_v_w_b[0:3,0:3].T , T_v_w_b[0:3,3])
 		traj_imu_b[:,i] = -1*np.dot(x_op[4*i:4*(i+1)-1,0:3].T, x_op[4*i:4*(i+1)-1,3])
+		T_i_w_gt = invert_transform(np.dot(dataset.T_w_cam0[i], dataset_raw.calib.T_cam0_imu))
+		e_pose_oneit[:,i:i+1] = pose_inv_map(np.dot(T_i_w_gt , invert_transform(x_op[4*i:4*(i+1),:])))
 			
 	x_op[-4:,:] = np.dot(pose_for_map(dx[-6:]) , x_op[-4:,:])#adjust calibration
+
+	e_calib[:,num_batch_it+1:num_batch_it+2] = pose_inv_map(np.dot(dataset_raw.calib.T_velo_imu , invert_transform(x_op[-4:,:])))
+	e_pose_rms[:,num_batch_it+1] = np.sqrt(K+1)*np.linalg.norm(e_pose_oneit, axis=1)
+
 	#print(pose_for_map(dx[-6:]))
-	print('Calibration (T_v_i):')
-	print(x_op[-4:,:])
+	#print('Calibration (T_v_i):')
+	#print(x_op[-4:,:])
 	"""
 	f2 = plt.figure()
 	ax2 = f2.add_subplot(111, projection='3d')
@@ -478,11 +495,11 @@ ax2.scatter(traj_velo_meas[0,:],
             traj_velo_meas[2,:],
 	    color='g')
 
-ax2.set_title('velo estimated (blue), measured (green) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
-plt.xlabel('x')
-plt.ylabel('y')
-plt.xlim((-5,0))
-plt.ylim((-5,0))
+ax2.set_title('velo estimated (blue), measured (green) & actual (red) trajectory, post batch iteration #' + str(num_batch_it+1))
+plt.xlabel('x (m)')
+plt.ylabel('y (m)')
+plt.xlim((-3,0))
+plt.ylim((-3,0))
 
 f3 = plt.figure()
 ax3 = f3.add_subplot(111, projection='3d')
@@ -502,11 +519,112 @@ ax3.scatter(traj_imu[0,:],
             traj_imu[2,:],
 	    color='r')
 
-ax3.set_title('imu estimated (blue) & actual (red) trajectory, post batch iteration #' + str(num_batch_it))
-plt.xlabel('x')
-plt.ylabel('y')
-plt.xlim((-5,0))
-plt.ylim((-5,0))
+ax3.set_title('imu estimated (blue), measured (green) & actual (red) trajectory, post batch iteration #' + str(num_batch_it+1))
+plt.xlabel('x (m)')
+plt.ylabel('y (m)')
+plt.xlim((-3,0))
+plt.ylim((-3,0))
 
 plt.show()
+
+e_calib_t = np.linalg.norm(e_calib[0:3,:], axis=0)
+e_calib_r = np.linalg.norm(e_calib[3:6,:], axis=0)
+
+e_pose_rms_t = np.mean(e_pose_rms[0:3,:], axis=0)
+e_pose_rms_r = np.mean(e_pose_rms[3:6,:], axis=0)
+
+plt.figure()
+plt.plot(e_calib_t[1:])
+plt.xlabel('Batch solver iterations')
+plt.ylabel('Calibration translational error (m)')
+
+plt.figure()
+plt.plot(e_calib_r[1:])
+plt.xlabel('Batch solver iterations')
+plt.ylabel('Calibration rotational error (rads)')
+
+plt.figure()
+plt.plot(e_pose_rms_t[1:])
+plt.xlabel('Batch solver iterations')
+plt.ylabel('RMS pose translational error (m)')
+
+plt.figure()
+plt.plot(e_pose_rms_r[1:])
+plt.xlabel('Batch solver iterations')
+plt.ylabel('RMS pose rotational error (rads)')
+plt.show()
+
+plt.figure()
+plt.plot(fitness_vec)
+plt.xlabel('Timestep')
+plt.ylabel('Point cloud alignment fitness')
+plt.show()
+
+var_x = np.zeros((K+1))
+var_y = np.zeros((K+1))
+var_z = np.zeros((K+1))
+var_th1 = np.zeros((K+1))
+var_th2 = np.zeros((K+1))
+var_th3 = np.zeros((K+1))
+
+cov_final = np.linalg.inv(A)
+var_final = np.diag(cov_final)
+for i in range(len(dataset.frame_range)):
+	var_x[i] = var_final[6*i]
+	var_y[i] = var_final[6*i + 1]
+	var_z[i] = var_final[6*i + 2]
+	var_th1[i] = var_final[6*i + 3]
+	var_th2[i] = var_final[6*i + 4]
+	var_th3[i] = var_final[6*i + 5]
+
+plt.figure()
+plt.plot(range(K+1),e_pose_oneit[0,:],color='blue')
+plt.plot(range(K+1),3*np.sqrt(var_x),color='red')
+plt.plot(range(K+1),-3*np.sqrt(var_x),color='red')
+plt.xlabel('Timestep')
+plt.ylabel('Translational error along x-axis (m)')
+plt.legend(['error','3 sigma confidence level'])
+
+plt.figure()
+plt.plot(range(K+1),e_pose_oneit[1,:],color='blue')
+plt.plot(range(K+1),3*np.sqrt(var_y),color='red')
+plt.plot(range(K+1),-3*np.sqrt(var_y),color='red')
+plt.xlabel('Timestep')
+plt.ylabel('Translational error along y-axis (m)')
+plt.legend(['error','3 sigma confidence level'])
+
+plt.figure()
+plt.plot(range(K+1),e_pose_oneit[2,:],color='blue')
+plt.plot(range(K+1),3*np.sqrt(var_z),color='red')
+plt.plot(range(K+1),-3*np.sqrt(var_z),color='red')
+plt.xlabel('Timestep')
+plt.ylabel('Translational error along z-axis (m)')
+plt.legend(['error','3 sigma confidence level'])
+
+plt.figure()
+plt.plot(range(K+1),e_pose_oneit[3,:],color='blue')
+plt.plot(range(K+1),3*np.sqrt(var_th1),color='red')
+plt.plot(range(K+1),-3*np.sqrt(var_th1),color='red')
+plt.xlabel('Timestep')
+plt.ylabel('Rotaional error about x-axis (rad)')
+plt.legend(['error','3 sigma confidence level'])
+
+plt.figure()
+plt.plot(range(K+1),e_pose_oneit[4,:],color='blue')
+plt.plot(range(K+1),3*np.sqrt(var_th2),color='red')
+plt.plot(range(K+1),-3*np.sqrt(var_th2),color='red')
+plt.xlabel('Timestep')
+plt.ylabel('Rotaional error about y-axis (rad)')
+plt.legend(['error','3 sigma confidence level'])
+
+plt.figure()
+plt.plot(range(K+1),e_pose_oneit[5,:],color='blue')
+plt.plot(range(K+1),3*np.sqrt(var_th3),color='red')
+plt.plot(range(K+1),-3*np.sqrt(var_th3),color='red')
+plt.xlabel('Timestep')
+plt.ylabel('Rotaional error about z-axis (rad)')
+plt.legend(['error','3 sigma confidence level'])
+
+plt.show()
+
 
