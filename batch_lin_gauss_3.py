@@ -152,7 +152,7 @@ for i in range(len(dataset.frame_range)):
 		Q_k_IMU = np.square(delta_t)*Q_k_rate #convert rate uncertainty to pose change uncertainty
 		Q_k[6:12,6:12] = Q_k_IMU
 
-		W[6*i:(6*i+6),6*i:(6*i+6)] = 5000*Q_k_IMU
+		W[6*i:(6*i+6),6*i:(6*i+6)] = Q_k_IMU
 		W[6*(K+1+i):6*(K+2+i),6*(K+1+i):6*(K+2+i)] = R_k
 		#Pose change forward mapping
 		a = delta_p[3:6]#column of rotational deltas
