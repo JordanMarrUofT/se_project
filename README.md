@@ -9,4 +9,4 @@ The project makes use of numpy, Point Cloud Library and its python wrapper, and 
 To run:
 1) 'pip install pykitti'
 2) replace the "raw.py" file in "(PATH TO PYTHON LIBRARIES)/python2.7/dist-packages/pykitti" with the version from this repository 
-3) 'python demo_odometry.py'
+3) 'python batch_lin_gauss_3.py'
